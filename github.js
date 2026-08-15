@@ -162,3 +162,159 @@ export async function testGithubConnection(token, targetRepo = null) {
   }
 }
 
+/**
+ * Fetch authenticated GitHub username (GET /user).
+ * @param {string} token
+ * @returns {Promise<string|null>}
+ */
+export async function getAuthenticatedUsername(token) {
+  if (!token) return null;
+  try {
+    const res = await fetch('https://api.github.com/user', {
+      method: 'GET',
+      headers: {
+        Authorization: `Bearer ${token.trim()}`,
+        Accept: 'application/vnd.github.v3+json'
+      }
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    return data?.login || null;
+  } catch (err) {
+    console.error('getAuthenticatedUsername error:', err);
+    return null;
+  }
+}
+
+/**
+ * Atomic and idempotent upload of LeetCode solution and AI README to GitHub.
+ * 1. Checks if Solution.{ext} and README.md already exist.
+ * 2. Uploads Solution.{ext} first.
+ * 3. Uploads README.md second (with retry mechanism and SHA lookup if needed).
+ * 4. Returns rich debugging metadata (commitSha, file URLs, folder/repo URLs).
+ * 
+ * @param {Object} params
+ * @returns {Promise<Object>}
+ */
+export async function uploadPhase4Solution({
+  token,
+  configuredRepo,
+  folderName,
+  solutionFileName,
+  solutionCode,
+  readmeContent,
+  commitMessage
+}) {
+  if (!token || !token.trim()) {
+    throw new Error('GitHub access token is required.');
+  }
+
+  const cleanToken = token.trim();
+
+  // Determine repository owner/name
+  let repoPath = '';
+  if (configuredRepo && configuredRepo.trim()) {
+    const cleanRepo = configuredRepo.trim();
+    if (cleanRepo.includes('/')) {
+      repoPath = cleanRepo;
+    } else {
+      const username = await getAuthenticatedUsername(cleanToken);
+      if (!username) throw new Error('Failed to retrieve GitHub username.');
+      repoPath = `${username}/${cleanRepo}`;
+    }
+  } else {
+    const username = await getAuthenticatedUsername(cleanToken);
+    if (!username) throw new Error('Failed to retrieve GitHub username.');
+    repoPath = `${username}/LeetCode`;
+  }
+
+  const solutionFilePath = `${folderName}/${solutionFileName}`;
+  const readmeFilePath = `${folderName}/README.md`;
+
+  // Step 1: Deduplication Check
+  const solutionFile = await getRepoFile(cleanToken, repoPath, solutionFilePath);
+  const readmeFile = await getRepoFile(cleanToken, repoPath, readmeFilePath);
+
+  if (solutionFile && readmeFile) {
+    return {
+      status: 'ALREADY_SYNCED',
+      message: 'Already synced.',
+      repoUrl: `https://github.com/${repoPath}`,
+      folderUrl: `https://github.com/${repoPath}/tree/main/${folderName}`
+    };
+  }
+
+  // Step 2: Atomic Upload - Upload Solution.{ext} FIRST
+  const solutionCommitResult = await commitFile(
+    cleanToken,
+    repoPath,
+    solutionFilePath,
+    commitMessage,
+    solutionCode,
+    solutionFile?.sha || null
+  );
+
+  const commitSha =
+    solutionCommitResult?.commit?.sha ||
+    solutionCommitResult?.content?.sha ||
+    '';
+
+  const solutionFileUrl =
+    solutionCommitResult?.content?.html_url ||
+    `https://github.com/${repoPath}/blob/main/${solutionFilePath}`;
+
+  // Step 3: Upload README.md SECOND (with retry)
+  let readmeCommitResult = null;
+  try {
+    readmeCommitResult = await commitFile(
+      cleanToken,
+      repoPath,
+      readmeFilePath,
+      commitMessage,
+      readmeContent,
+      readmeFile?.sha || null
+    );
+  } catch (firstErr) {
+    console.warn('README upload failed on first attempt, retrying once...', firstErr);
+    // Retry ONCE after 1 second
+    await new Promise(r => setTimeout(r, 1000));
+    try {
+      // Re-check existing file SHA to guarantee idempotency
+      const currentReadmeState = await getRepoFile(cleanToken, repoPath, readmeFilePath);
+      readmeCommitResult = await commitFile(
+        cleanToken,
+        repoPath,
+        readmeFilePath,
+        commitMessage,
+        readmeContent,
+        currentReadmeState?.sha || null
+      );
+    } catch (retryErr) {
+      console.error('README upload retry failed:', retryErr);
+      throw new Error(`Failed to upload README.md: ${retryErr.message}`);
+    }
+  }
+
+  const readmeFileUrl =
+    readmeCommitResult?.content?.html_url ||
+    `https://github.com/${repoPath}/blob/main/${readmeFilePath}`;
+
+  const repoUrl = `https://github.com/${repoPath}`;
+  const folderUrl = `https://github.com/${repoPath}/tree/main/${folderName}`;
+  const commitUrl = commitSha
+    ? `https://github.com/${repoPath}/commit/${commitSha}`
+    : repoUrl;
+
+  return {
+    status: 'SYNCED',
+    message: 'Solution synced to GitHub.',
+    repoUrl,
+    folderUrl,
+    commitUrl,
+    commitSha,
+    solutionFileUrl,
+    readmeFileUrl
+  };
+}
+
+

@@ -272,14 +272,80 @@ export function extractLanguageFromDOM(doc = document) {
  * @returns {string}
  */
 export function extractCodeFromMonaco(doc = document) {
-  // Primary selector: Monaco editor line elements
-  const lines = doc.querySelectorAll('.monaco-editor .view-lines .view-line');
+  function returnMonacoCode(codeStr) {
+    console.log('Monaco model detected.');
+    console.log(`Extracted code length: ${codeStr.length}`);
+    return codeStr;
+  }
+
+  // 1. First check for window.monaco.editor.getModels() (direct check if in main world context)
+  try {
+    const monacoObj = window.monaco || doc.defaultView?.monaco;
+    if (monacoObj && monacoObj.editor && typeof monacoObj.editor.getModels === 'function') {
+      const models = monacoObj.editor.getModels();
+      if (models && models.length > 0) {
+        const val = models[0].getValue();
+        if (val !== null && val !== undefined) {
+          return returnMonacoCode(val);
+        }
+      }
+    }
+  } catch (err) {
+    // Ignore direct access error
+  }
+
+  // 2. Query MAIN world content script (injected.js) via DOM event / attribute bridge
+  try {
+    doc.dispatchEvent(new CustomEvent('LEETCODE_AUTOSYNC_EXTRACT'));
+    const mainWorldCode = doc.documentElement.getAttribute('data-monaco-code');
+    if (mainWorldCode !== null && mainWorldCode !== undefined && mainWorldCode.length > 0) {
+      return returnMonacoCode(mainWorldCode);
+    }
+  } catch (err) {
+    // Ignore DOM event bridge error
+  }
+
+  // 3. Inline script injection fallback for Monaco model access
+  try {
+    const script = doc.createElement('script');
+    script.textContent = `
+      (function() {
+        try {
+          if (window.monaco && window.monaco.editor && typeof window.monaco.editor.getModels === 'function') {
+            var models = window.monaco.editor.getModels();
+            if (models && models.length > 0) {
+              var val = models[0].getValue();
+              if (val !== null && val !== undefined) {
+                document.documentElement.setAttribute('data-monaco-code', val);
+                return;
+              }
+            }
+          }
+        } catch (e) {}
+        document.documentElement.removeAttribute('data-monaco-code');
+      })();
+    `;
+    (doc.head || doc.documentElement).appendChild(script);
+    script.remove();
+
+    const inlineCode = doc.documentElement.getAttribute('data-monaco-code');
+    doc.documentElement.removeAttribute('data-monaco-code');
+
+    if (inlineCode !== null && inlineCode !== undefined && inlineCode.length > 0) {
+      return returnMonacoCode(inlineCode);
+    }
+  } catch (err) {
+    // Ignore inline script injection error
+  }
+
+  // 4. Only use .view-line concatenation as a fallback when no Monaco model exists
+  const lines = doc.querySelectorAll('.monaco-editor .view-lines .view-line, .view-line');
   if (lines && lines.length > 0) {
     const codeLines = Array.from(lines).map(line => line.textContent || '');
     return codeLines.join('\n');
   }
 
-  // Secondary selector: CodeMirror or textarea
+  // Secondary fallback: CodeMirror or inputarea
   const textarea = doc.querySelector('textarea.inputarea, .CodeMirror-code');
   if (textarea && textarea.value) {
     return textarea.value;
@@ -364,3 +430,134 @@ export function showDetectionToast(message = 'LeetCode solution detected.') {
     }, 300);
   }, 3000);
 }
+
+/* ==========================================================================
+   Phase 4 Automatic GitHub Sync Helpers
+   ========================================================================== */
+
+/**
+ * Get solution file name mapped to LeetCode programming language.
+ * Examples:
+ *   Java -> Solution.java
+ *   Python / Python3 -> Solution.py
+ *   C++ -> Solution.cpp
+ *   C -> Solution.c
+ *   JavaScript -> Solution.js
+ *   TypeScript -> Solution.ts
+ *   Go -> Solution.go
+ *   Kotlin -> Solution.kt
+ * @param {string} language
+ * @returns {string}
+ */
+export function getSolutionFileName(language) {
+  if (!language || typeof language !== 'string') return 'Solution.txt';
+  const ext = getLanguageExtension(language);
+  return `Solution.${ext}`;
+}
+
+/**
+ * Format four-digit zero-padded hyphenated folder name.
+ * Example: ID "1", Title "Two Sum" -> "0001-Two-Sum"
+ * Example: ID "347", Title "Top K Frequent Elements" -> "0347-Top-K-Frequent-Elements"
+ * @param {string|number} id
+ * @param {string} title
+ * @returns {string}
+ */
+export function formatPhase4FolderName(id, title) {
+  const cleanId = String(id || '0').trim().padStart(4, '0');
+  
+  // Format title: preserve words capitalized, replace spaces/special chars with hyphens
+  const cleanTitle = (title || 'LeetCode-Problem')
+    .trim()
+    .replace(/[^a-zA-Z0-9\s-]/g, '')
+    .replace(/\s+/g, '-');
+
+  return `${cleanId}-${cleanTitle}`;
+}
+
+/**
+ * Format Phase 4 README template according to exact specification:
+ * 
+ * # {Problem Number}. {Problem Title}
+ * Difficulty badge
+ * Language
+ * Date Solved
+ * ---
+ * ## Solution
+ * See Solution.{ext}
+ * ---
+ * ## AI Explanation
+ * (Gemini Markdown)
+ * ---
+ * Generated automatically by LeetCode AutoSync AI.
+ *
+ * @param {Object} params
+ * @returns {string}
+ */
+export function formatPhase4Readme({
+  id = '0',
+  title = 'LeetCode Problem',
+  difficulty = 'Easy',
+  language = 'Java',
+  dateSolved = new Date().toISOString().split('T')[0],
+  solutionFileName = 'Solution.java',
+  aiExplanation = ''
+}) {
+  const problemNumber = String(id).replace(/^0+/, '') || '0';
+  const cleanAiText = (aiExplanation && aiExplanation.trim())
+    ? aiExplanation.trim()
+    : '*(AI explanation unavailable)*';
+
+  return `# ${problemNumber}. ${title}
+
+**Difficulty:** \`${difficulty}\`  
+**Language:** \`${language}\`  
+**Date Solved:** \`${dateSolved}\`  
+
+---
+
+## Solution
+
+See \`${solutionFileName}\`
+
+---
+
+## AI Explanation
+
+${cleanAiText}
+
+---
+
+Generated automatically by LeetCode AutoSync AI.
+`;
+}
+
+/**
+ * Fast string hash function (djb2 variant).
+ * @param {string} str
+ * @returns {string}
+ */
+export function fastStringHash(str) {
+  if (!str) return '0';
+  let hash = 5381;
+  for (let i = 0; i < str.length; i++) {
+    hash = ((hash << 5) + hash) ^ str.charCodeAt(i);
+  }
+  return (hash >>> 0).toString(16);
+}
+
+/**
+ * Generate a unique submission fingerprint string (problemId:language:codeHash).
+ * @param {string|number} id
+ * @param {string} language
+ * @param {string} code
+ * @returns {string}
+ */
+export function generateSubmissionFingerprint(id, language, code) {
+  const cleanId = String(id || '0').trim();
+  const cleanLang = String(language || 'unknown').trim().toLowerCase();
+  const codeHash = fastStringHash(code || '');
+  return `${cleanId}:${cleanLang}:${codeHash}`;
+}
+
+

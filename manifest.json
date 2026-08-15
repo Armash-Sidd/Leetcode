@@ -37,6 +37,16 @@
         "https://leetcode.com/problems/*"
       ],
       "js": [
+        "injected.js"
+      ],
+      "world": "MAIN",
+      "run_at": "document_start"
+    },
+    {
+      "matches": [
+        "https://leetcode.com/problems/*"
+      ],
+      "js": [
         "content.js"
       ],
       "run_at": "document_idle"
@@ -45,7 +55,10 @@
   "web_accessible_resources": [
     {
       "resources": [
-        "utils.js"
+        "injected.js",
+        "utils.js",
+        "github.js",
+        "gemini.js"
       ],
       "matches": [
         "https://leetcode.com/*"
